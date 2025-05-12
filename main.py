@@ -14,7 +14,7 @@ import qrcode
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
-import jwt
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 
@@ -33,7 +33,7 @@ from sqlalchemy.sql import func
 from databases import Database
 
 # Authentication and Security Imports
-import jwt
+from jose import jwt
 from passlib.context import CryptContext
 
 # Configuration and Validation Imports
@@ -778,7 +778,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         if username is None:
             raise credentials_exception
         token_data = TokenData(username=username)
-    except jwt.PyJWTError:
+    except jwt.JWTError:
         raise credentials_exception
     user = db.query(User).filter(User.username == token_data.username).first()
     if user is None:
