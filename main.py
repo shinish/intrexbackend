@@ -61,6 +61,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 UPLOAD_DIR = Path("uploads/trainee_photos")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Set up signature photo directory
+TRAINER_SIGNATURE_DIR = Path("uploads/trainer_signatures")
+TRAINER_SIGNATURE_DIR.mkdir(parents=True, exist_ok=True)
+
 # Create router
 certificate_router = APIRouter(prefix="/certificates", tags=["certificates"])
 
@@ -76,8 +80,8 @@ class TrainingStatus(str, enum.Enum):
     CANCELLED = "Cancelled"
 
 class TrainerType(str, enum.Enum):
-    EMPLOYEE = "Employee"
-    FREELANCER = "Freelancer"
+    Employee = "Employee"
+    Freelancer = "Freelancer"
 
 # Database Models
 class User(Base):
@@ -113,20 +117,16 @@ class TrainingCourse(Base):
     
     training_registrations = relationship("TrainingRegistration", back_populates="training_course")
 
-class Trainer(Base):
-    __tablename__ = "trainers"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)
-    type = Column(String)  # Employee or Freelancer
-    charge_per_hour = Column(Float)
-    contact_number = Column(String)
-    phone = Column(String)
-    email = Column(String)
-    address = Column(String)
-    gov_id_number = Column(String)
-    
-    training_registrations = relationship("TrainingRegistration", back_populates="trainer")
+class TrainerBase(BaseModel):
+    name: str
+    type: TrainerType
+    charge_per_hour: float
+    contact_number: str
+    phone: str
+    email: EmailStr
+    address: str
+    gov_id_number: str
+    model_config = ConfigDict(from_attributes=True)
 
 class TrainingCertification(Base):
     __tablename__ = "training_certifications"
@@ -233,22 +233,29 @@ class TrainingCourseCreate(TrainingCourseBase):
 class TrainingCourseOut(TrainingCourseBase):
     id: int
 
-class TrainerBase(BaseModel):
-    name: str
-    type: TrainerType
-    charge_per_hour: float
-    contact_number: str
-    phone: str
-    email: EmailStr
-    address: str
-    gov_id_number: str
-    model_config = ConfigDict(from_attributes=True)
+class Trainer(Base):
+    __tablename__ = "trainers"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    type = Column(String)  # Employee or Freelancer
+    charge_per_hour = Column(Float)
+    contact_number = Column(String)
+    phone = Column(String)
+    email = Column(String)
+    address = Column(String)
+    gov_id_number = Column(String)
+    signature_photo_path = Column(String, nullable=True)  # Added field for signature photo
+    
+    training_registrations = relationship("TrainingRegistration", back_populates="trainer")
 
 class TrainerCreate(TrainerBase):
     pass
 
 class TrainerOut(TrainerBase):
     id: int
+    type: str
+    signature_photo_path: Optional[str] = None
 
 class TrainingCertificationBase(BaseModel):
     name: str
@@ -453,10 +460,12 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
+# Update the function to include the trainer signatures directory
 def create_directories():
     # Create necessary directories
     directories = [
         Path("uploads/trainee_photos"),
+        Path("uploads/trainer_signatures"),  # Added trainer signatures directory
         Path("static"),
         Path("uploads"),
         Path("logs")  # Additional directory for potential logging
@@ -499,7 +508,9 @@ def format_date(date: datetime) -> str:
     return date.strftime("%d-%m-%Y")
 
 
-# Background task to generate certificate image
+# Update the certificate generation function to include trainer signatures
+
+# Modified generate_certificate_image function
 def generate_certificate_image(
     cert_id: str,
     trainee_name: str,
@@ -633,27 +644,90 @@ def generate_certificate_image(
         y_pos += 120
         signature_line_y = y_pos + 30
         
-        # Left signature
+        # Get certificate information to find the trainer
+        certificate = db.query(CertificateDB).filter(CertificateDB.id == cert_id).first()
+        if certificate:
+            # Get registration information
+            registration = db.query(TrainingRegistration).filter(
+                TrainingRegistration.id == certificate.registration_id
+            ).first()
+            
+            if registration:
+                # Get trainer information
+                trainer = db.query(Trainer).filter(
+                    Trainer.id == registration.trainer_id
+                ).first()
+        
+        # Left signature (INTREX Official)
         left_sig_x = width // 4
-        draw.text((left_sig_x, y_pos), "<<Signature>>",
-                  fill=(0, 0, 0), font=small_font, anchor="mm")
+        left_sig_width = 200
+        left_sig_height = 100
+        
+        # Draw placeholder for INTREX Official signature
         draw.line([(left_sig_x - 100, signature_line_y), (left_sig_x + 100, signature_line_y)],
                   fill=(0, 0, 0), width=2)
+        
+        draw.text((left_sig_x, signature_line_y - 30), "<<Signature>>",
+                  fill=(0, 0, 0), font=small_font, anchor="mm")
         
         draw.text((left_sig_x, signature_line_y + 40), "INTREX Official's Name",
                   fill=(0, 0, 0), font=small_font, anchor="mm")
         draw.text((left_sig_x, signature_line_y + 80), "For and on behalf of INTREX",
                   fill=(0, 0, 0), font=small_font, anchor="mm")
         
-        # Right signature
+        # Right signature (Trainer/Instructor)
         right_sig_x = width * 3 // 4
-        draw.text((right_sig_x, y_pos), "<<Signature>>",
-                  fill=(0, 0, 0), font=small_font, anchor="mm")
+        right_sig_width = 200
+        right_sig_height = 100
+        
+        # If trainer exists and has a signature photo, add it to the certificate
+        if 'trainer' in locals() and trainer and trainer.signature_photo_path and os.path.exists(trainer.signature_photo_path):
+            try:
+                # Load trainer signature
+                trainer_signature = Image.open(trainer.signature_photo_path)
+                
+                # Resize signature to fit the designated area
+                trainer_signature = trainer_signature.resize((right_sig_width, right_sig_height))
+                
+                # Calculate position to center the signature above the line
+                sig_pos = (right_sig_x - right_sig_width // 2, signature_line_y - right_sig_height)
+                
+                # Paste the signature on the certificate
+                template.paste(trainer_signature, sig_pos, trainer_signature.convert('RGBA'))
+                
+                # Add trainer name
+                draw.text((right_sig_x, signature_line_y + 40), trainer.name,
+                          fill=(0, 0, 0), font=small_font, anchor="mm")
+            except Exception as e:
+                print(f"Error adding trainer signature: {e}")
+                # Add placeholder text if signature can't be added
+                draw.text((right_sig_x, signature_line_y - 30), "<<Signature>>",
+                          fill=(0, 0, 0), font=small_font, anchor="mm")
+                
+                if trainer:
+                    draw.text((right_sig_x, signature_line_y + 40), trainer.name,
+                              fill=(0, 0, 0), font=small_font, anchor="mm")
+                else:
+                    draw.text((right_sig_x, signature_line_y + 40), "Instructor Name",
+                              fill=(0, 0, 0), font=small_font, anchor="mm")
+        else:
+            # Draw placeholder for trainer signature
+            draw.text((right_sig_x, signature_line_y - 30), "<<Signature>>",
+                      fill=(0, 0, 0), font=small_font, anchor="mm")
+            
+            # Add trainer name if available
+            if 'trainer' in locals() and trainer:
+                draw.text((right_sig_x, signature_line_y + 40), trainer.name,
+                          fill=(0, 0, 0), font=small_font, anchor="mm")
+            else:
+                draw.text((right_sig_x, signature_line_y + 40), "Instructor Name",
+                          fill=(0, 0, 0), font=small_font, anchor="mm")
+        
+        # Draw the signature line
         draw.line([(right_sig_x - 100, signature_line_y), (right_sig_x + 100, signature_line_y)],
                   fill=(0, 0, 0), width=2)
         
-        draw.text((right_sig_x, signature_line_y + 40), "Instructor Name",
-                  fill=(0, 0, 0), font=small_font, anchor="mm")
+        # Add instructor title
         draw.text((right_sig_x, signature_line_y + 80), "Instructor",
                   fill=(0, 0, 0), font=small_font, anchor="mm")
         
@@ -995,15 +1069,70 @@ async def read_training_course(
 # Trainer Routes
 @app.post("/trainers/", response_model=TrainerOut)
 async def create_trainer(
-    trainer: TrainerCreate, 
-    db: Session = Depends(get_db), 
+    name: str = Form(...),
+    type: TrainerType = Form(...),
+    charge_per_hour: float = Form(...),
+    contact_number: str = Form(...),
+    phone: str = Form(...),
+    email: str = Form(...),
+    address: str = Form(...),
+    gov_id_number: str = Form(...),
+    signature_photo: UploadFile = File(...),  # Made signature photo mandatory
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    db_trainer = Trainer(**trainer.model_dump())
-    db.add(db_trainer)
-    db.commit()
-    db.refresh(db_trainer)
-    return db_trainer
+    try:
+        # Validate the signature photo
+        if not signature_photo or not signature_photo.filename:
+            raise HTTPException(
+                status_code=400, 
+                detail="Signature photo is required for trainers"
+            )
+        
+        # Process and save the signature photo
+        file_extension = os.path.splitext(signature_photo.filename)[1]
+        allowed_extensions = ['.jpg', '.jpeg', '.png']
+        
+        if file_extension.lower() not in allowed_extensions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Signature photo must be in one of these formats: {', '.join(allowed_extensions)}"
+            )
+        
+        # Create unique filename for signature
+        signature_filename = f"signature_{uuid4()}{file_extension}"
+        signature_path = TRAINER_SIGNATURE_DIR / signature_filename
+        
+        # Save the signature photo
+        with open(signature_path, "wb") as buffer:
+            shutil.copyfileobj(signature_photo.file, buffer)
+        
+        # Create trainer with signature photo path
+        db_trainer = Trainer(
+            name=name,
+            type=str(type),
+            charge_per_hour=charge_per_hour,
+            contact_number=contact_number,
+            phone=phone,
+            email=email,
+            address=address,
+            gov_id_number=gov_id_number,
+            signature_photo_path=str(signature_path)
+        )
+        
+        db.add(db_trainer)
+        db.commit()
+        db.refresh(db_trainer)
+        return db_trainer
+        
+    except Exception as e:
+        # Log the exception
+        print(f"Error creating trainer: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create trainer: {str(e)}"
+        )
 
 @app.get("/trainers/", response_model=List[TrainerOut])
 async def read_trainers(
@@ -1014,6 +1143,74 @@ async def read_trainers(
 ):
     trainers = db.query(Trainer).offset(skip).limit(limit).all()
     return trainers
+
+# Add endpoint to update trainer signature
+@app.put("/trainers/{trainer_id}/signature", response_model=TrainerOut)
+async def update_trainer_signature(
+    trainer_id: int,
+    signature_photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    # Find the trainer
+    trainer = db.query(Trainer).filter(Trainer.id == trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found")
+    
+    # Validate the signature photo
+    if not signature_photo or not signature_photo.filename:
+        raise HTTPException(
+            status_code=400, 
+            detail="Signature photo is required"
+        )
+    
+    # Process and save the signature photo
+    file_extension = os.path.splitext(signature_photo.filename)[1]
+    allowed_extensions = ['.jpg', '.jpeg', '.png']
+    
+    if file_extension.lower() not in allowed_extensions:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Signature photo must be in one of these formats: {', '.join(allowed_extensions)}"
+        )
+    
+    # Remove old signature photo if exists
+    if trainer.signature_photo_path and os.path.exists(trainer.signature_photo_path):
+        os.remove(trainer.signature_photo_path)
+    
+    # Create unique filename for signature
+    signature_filename = f"signature_{uuid4()}{file_extension}"
+    signature_path = TRAINER_SIGNATURE_DIR / signature_filename
+    
+    # Save the signature photo
+    with open(signature_path, "wb") as buffer:
+        shutil.copyfileobj(signature_photo.file, buffer)
+    
+    # Update trainer with new signature photo path
+    trainer.signature_photo_path = str(signature_path)
+    db.commit()
+    db.refresh(trainer)
+    
+    return trainer
+
+@app.get("/trainers/{trainer_id}/signature")
+async def get_trainer_signature(
+    trainer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    trainer = db.query(Trainer).filter(Trainer.id == trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found")
+    
+    if not trainer.signature_photo_path:
+        raise HTTPException(status_code=404, detail="No signature photo available for this trainer")
+    
+    signature_path = Path(trainer.signature_photo_path)
+    if not signature_path.exists():
+        raise HTTPException(status_code=404, detail="Signature photo file not found")
+    
+    return FileResponse(signature_path)
 
 @app.get("/trainers/{trainer_id}", response_model=TrainerOut)
 async def read_trainer(
@@ -1740,6 +1937,17 @@ async def generate_certificate(
     if not registration:
         raise HTTPException(status_code=404, detail="Training registration not found")
     
+    # Check if the trainer has a signature
+    trainer = db.query(Trainer).filter(Trainer.id == registration.trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found for this registration")
+    
+    if not trainer.signature_photo_path or not os.path.exists(trainer.signature_photo_path):
+        raise HTTPException(
+            status_code=400, 
+            detail="Trainer does not have a signature photo. Please add a signature photo for the trainer before generating certificates."
+        )
+    
     # Check if certificate already exists
     existing_cert = db.query(CertificateDB).filter(
         CertificateDB.trainee_id == trainee.id,
@@ -1823,6 +2031,7 @@ async def generate_certificate_route(
         request, background_tasks, data, db, current_user
     )
 
+# Updated certificate route handler
 @certificate_router.post("/generate", response_model=Certificate)
 async def generate_certificate_route(
     request: Request,
@@ -1831,6 +2040,10 @@ async def generate_certificate_route(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
+    """
+    Route handler for certificate generation.
+    This calls the generate_certificate function with the necessary parameters.
+    """
     return await generate_certificate(request, background_tasks, data, db, current_user)
 
 async def list_certificates(
